@@ -7,6 +7,7 @@ import sys
 import os
 import re
 
+from collections import OrderedDict
 from subprocess import getoutput
 from shutil import which
 from pathlib import Path
@@ -73,12 +74,14 @@ def get_shared_libs(executable, known_deps=None):
 
 
 def parse_star_file(fname):
+    loop_version = "# version 30001"
+    loop_name = "data_"
     in_loop = False
     in_loop_header = False
     headers = []
     header_re = re.compile(r"(_\S+)")
     header_multi_re = re.compile(r"(_\S+)\s+#([0-9]+)")
-    entries = []
+    loops = OrderedDict()
     i = 0
     for line in open(fname, 'r'):
         i += 1
@@ -91,13 +94,23 @@ def parse_star_file(fname):
         if line == "loop_":
             in_loop = True
             in_loop_header = True
+            loops[loop_name] = {
+                'version': loop_version,
+                'headers': [],
+                'entries': [],
+            }
             continue
         if not in_loop:
+            if line.startswith("#"):
+                loop_version = line
+            else:
+                loop_name = line
             continue
         if in_loop_header:
             if not line.startswith("_"):
                 in_loop_header = False
                 headers.sort()
+                loops[loop_name]['headers'] = headers
             else:
                 match = header_multi_re.match(line)
                 if match:
@@ -113,37 +126,28 @@ def parse_star_file(fname):
         if len(col) < len(headers):
             logging.warning(f"Error in line {i} of {fname}: Found {len(col)} values, expected {len(headers)}")
             continue
-        entries.append(dict(zip(headers, col)))
-    return entries
+        loops[loop_name]['entries'].append(dict(zip(headers, col)))
+    return loops
 
 
-def write_star_file(fname, entries):
-    intro = """# RELION version 3.0.8
-
-data_
-
-loop_
-"""
-    outro = "\n"
-
-    if len(entries) > 0:
-        headers = list(entries[0].keys())
-        headers.sort()
-    else:
-        logging.warning(f'No entries found to write to {fname}')
-        return
-
+def write_star_file(fname, loops):
     with open(fname, 'w') as f:
-        f.write(intro)
-        for header in headers:
-            if len(header) > 1:
-                f.write(f'{header[1]} #{header[0]}\n')
-            else:
-                f.write(f'{header[0]}\n')
-        for entry in entries:
-            entry_str = '\t'.join([entry[header] for header in headers])
-            f.write(f'{entry_str}\n')
-        f.write(outro)
+        for loop_name in loops:
+            f.write('\n')
+            f.write(f"{loops[loop_name]['version']}\n")
+            f.write('\n')
+            f.write(f"{loop_name}\n")
+            f.write('\n')
+            f.write('loop_\n')
+            for header in loops[loop_name]['headers']:
+                if len(header) > 1:
+                    f.write(f'{header[1]} #{header[0]}\n')
+                else:
+                    f.write(f'{header[0]}\n')
+            for entry in loops[loop_name]['entries']:
+                entry_str = '\t'.join([entry[header] for header in loops[loop_name]['headers']])
+                f.write(f'{entry_str}\n')
+            f.write('\n')
 
 
 def parse_command(command):
@@ -247,11 +251,13 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
     # Set up outputs
     transfer_output_files = ['output/corrected_micrographs.star',
                                  'output/$(movie_basename).mrc',
+                                 'output/$(movie_basename)_PS.mrc',
                                  'output/$(movie_basename).star',
                                  'output/$(movie_basename)_shifts.eps']
     transfer_output_remaps = {
         'corrected_micrographs.star': '$(starfile_out)',
         '$(movie_basename).mrc':        '../Movies/$(movie_basename).mrc',
+        '$(movie_basename)_PS.mrc':     '../Movies/$(movie_basename)_PS.mrc',
         '$(movie_basename).star':       '../Movies/$(movie_basename).star',
         '$(movie_basename)_shifts.eps': '../Movies/$(movie_basename)_shifts.eps',
     }
@@ -259,13 +265,14 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
 
     # Set up list of variables from the input star file
     dag_varlist = []
-    entries = parse_star_file(cmd_args.input_starfile)
+    loops = parse_star_file(cmd_args.input_starfile)
+    if 'data_movies' in loops:
+        loop_name = 'data_movies'
+    else:
+        loop_name = 'data_'
+    col_names = loops[loop_name]['headers']
+    entries = loops[loop_name]['entries']
     for entry in entries:
-        # Need to copy from movies.star:
-        # _rlnMicrographMovieName
-        col_names = list(entry.keys())
-        col_names.sort()
-
         # Add the full paths to the dag vars for file transfer,
         # get the basename of the micrograph file,
         # and name the input and output starfiles
@@ -285,7 +292,9 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
         entry[col_names[0]] = Path(entry[col_names[0]]).name
 
         # Write the input star file to the work dir
-        write_star_file(work_dir / starfile_in, [entry])
+        loops_single = loops.copy()
+        loops_single[loop_name]['entries'] = [entry]
+        write_star_file(work_dir / starfile_in, loops_single)
 
     submit_config['arguments'] = ' '.join(args)
     submit_config['transfer_input_files'] = transfer_input_files
@@ -303,33 +312,52 @@ def run_motioncorr_post(cmd_args, work_dir):
     Requires:
     1. Merge of individual output starfiles into entire output starfile corrected_micrographs.star
     2. logfile.pdf
+    3. RELION_JOB_EXIT_SUCCESS
     '''
     # Create a dummy logfile
     logfile_path = Path(cmd_args.output_dir) / 'logfile.pdf'
     logfile_path.touch()
 
     # Create corrected_micrographs.star
-    entries_out = []
-    for starfile in work_dir.glob('*_out.star'):
-        entry = parse_star_file(starfile)[0]
-        keys = list(entry.keys())
-        keys.sort()
+    starfiles = list(work_dir.glob('*_out.star'))
+    loops = parse_star_file(starfiles[0])
+    if 'data_micrographs' in loops:
+        loop_name = 'data_micrographs'
+    else:
+        loop_name = 'data_'
+    loops[loop_name]['entries'] = []
+    col_names = loops[loop_name]['headers']
+    for starfile in starfiles:
+        entry = parse_star_file(starfile)[loop_name]['entries'][0]
 
-        mrc_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[keys[0]]).name
+        # _rlnCtfPowerSpectrum #1
+        mrc_ps_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[col_names[0]]).name
+        if not mrc_ps_path.exists():
+            logging.warning(f'{mrc_ps_path} from {starfile} does not exist')
+        entry[col_names[0]] = str(mrc_ps_path)
+
+        #_rlnMicrographName #2
+        mrc_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[col_names[1]]).name
         if not mrc_path.exists():
-            logging.warning(f'{mrc_path} from {starfile} does not exist\n')
+            logging.warning(f'{mrc_path} from {starfile} does not exist')
             continue
-        mrc_starfile_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[keys[1]]).name
-        if not mrc_starfile_path.exists():
-            logging.warning(f'{mrc_path} from {starfile} does not exist\n')
-            continue
+        entry[col_names[1]] = str(mrc_path)
 
-        entry[keys[0]] = str(mrc_path)
-        entry[keys[1]] = str(mrc_starfile_path)
-        entries_out.append(entry)
+        # _rlnMicrographMetadata #3
+        mrc_starfile_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[col_names[2]]).name
+        if not mrc_starfile_path.exists():
+            logging.warning(f'{mrc_path} from {starfile} does not exist')
+            continue
+        entry[col_names[2]] = str(mrc_starfile_path)
+
+        loops[loop_name]['entries'].append(entry)
 
     # Write corrected_micrographs.star
-    write_star_file(str(Path(cmd_args.output_dir) / 'corrected_micrographs.star'), entries_out)
+    write_star_file(str(Path(cmd_args.output_dir) / 'corrected_micrographs.star'), loops)
+
+    # Signal success
+    success_path = Path(cmd_args.output_dir) / 'RELION_JOB_EXIT_SUCCESS'
+    success_path.touch()
 
 
 def run_ctffind_work(submit_config, cmd_args, work_dir):
