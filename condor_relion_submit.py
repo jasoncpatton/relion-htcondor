@@ -182,7 +182,7 @@ def get_submit(submit_config):
 def submit_dag(cmd_name, args, work_dir, submit_config, dag_varlist):
     dag = htcondor.dags.DAG()
     submit_description = get_submit(submit_config)
-   
+
     # Wrap the command for the DAG post script
     post_cmd = Path(sys.argv[0])
     post_args = [
@@ -199,7 +199,7 @@ def submit_dag(cmd_name, args, work_dir, submit_config, dag_varlist):
         submit_description = submit_description,
         vars = dag_varlist
     )
-    
+
     post_node = work_node.child_layer(
         name = f"{cmd_name}_post",
         noop = True,
@@ -208,7 +208,7 @@ def submit_dag(cmd_name, args, work_dir, submit_config, dag_varlist):
     )
 
     dag_file = htcondor.dags.write_dag(dag, work_dir)
-    sub = htcondor.Submit.from_dag(str(dag_file))
+    sub = htcondor.Submit.from_dag(str(dag_file), {'force': 1})
     schedd = htcondor.Schedd()
     with schedd.transaction() as txn:
         result = sub.queue(txn)
@@ -363,14 +363,15 @@ def run_motioncorr_post(cmd_args, work_dir):
 def run_ctffind_work(submit_config, cmd_args, work_dir):
     '''relion_run_ctffind
     # `which relion_run_ctffind` --i MotionCorr/job002/corrected_micrographs.star --o CtfFind/job032/
-    # --CS 2.7 --HT 300 --AmpCnst 0.1 --XMAG 10000 --DStep 1.4 --Box 512 --ResMin 30 --ResMax 5 --dFMin 5000 --dFMax 50000 --FStep 500 --dAst 100
-    # --ctffind_exe ctffind --ctfWin -1 --is_ctffind4 --fast_search --only_do_unfinished
+    # --Box 512 --ResMin 30 --ResMax 5 --dFMin 5000 --dFMax 50000 --FStep 500 --dAst 100
+    # --ctffind_exe ctffind --ctfWin -1 --is_ctffind4  --fast_search  --use_given_ps  --only_do_unfinished   --pipeline_control CtfFind/job032/
     Requires:
     1. Micrograph file $(mrc_file)
-    2. Micrograph starfile $(mrc_starfile)
-    3. Individual input starfile $(starfile_in) per entry in entire input starfile
-    4. Rename of output starfile $(starfile_out)
-    5. Rename and relocation of output CTF $(mrc_basename).ctf
+    2. Micrograph power spectrum file $(mrc_PS_file)
+    3. Micrograph starfile $(mrc_starfile)
+    4. Individual input starfile $(starfile_in) per entry in entire input starfile
+    5. Rename of output starfile $(starfile_out)
+    6. Rename and relocation of output CTF $(mrc_basename).ctf
     '''
 
     # Transfer ctffind and execute it from the scratch directory
@@ -381,39 +382,44 @@ def run_ctffind_work(submit_config, cmd_args, work_dir):
     transfer_input_files.update(get_shared_libs(ctffind_exe))
     args[args.index('--ctffind_exe') + 1] = f'./{Path(ctffind_exe).name}'
 
+    # Pipeline control doesn't apply here
+    args[args.index('--pipeline_control') + 1] = './'
+
     # Add other input files
     transfer_input_files.add(str(work_dir / '$(starfile_in)'))
     transfer_input_files.add(str(Path.cwd() / '$(mrc_file)'))
+    transfer_input_files.add(str(Path.cwd() / '$(mrc_PS_file)'))
     transfer_input_files.add(str(Path.cwd() / '$(mrc_starfile)'))
 
     # Set up outputs
-    transfer_output_files = ['output/micrographs_ctf.star', 'output/$(mrc_basename).ctf']
+    transfer_output_files = ['output/micrographs_ctf.star', 'output/$(mrc_basename)_PS.ctf']
     transfer_output_remaps = {
         'micrographs_ctf.star': '$(starfile_out)',
-        '$(mrc_basename).ctf': '../Movies/$(mrc_basename).ctf',
+        '$(mrc_basename)_PS.ctf': '../Movies/$(mrc_basename)_PS.ctf',
     }
     (work_dir.parent / 'Movies').mkdir(parents=True, exist_ok=True)
 
     # Set up list of variables from the input star file
     dag_varlist = []
-    entries = parse_star_file(cmd_args.input_starfile)
+    loops = parse_star_file(cmd_args.input_starfile)
+    if 'data_micrographs' in loops:
+        loop_name = 'data_micrographs'
+    else:
+        loop_name = 'data_'
+    col_names = loops[loop_name]['headers']
+    entries = loops[loop_name]['entries']
     for entry in entries:
-        # Need to copy from corrected_micrographs.star:
-        # _rlnMicrographName #1
-        # _rlnMicrographMetadata #2
-        col_names = list(entry.keys())
-        col_names.sort()
-
         # Add the full paths to the dag vars for file transfer,
         # get the basename of the micrograph file,
         # and name the input and output starfiles
         col_data = entry.copy()
-        mrc_basename = Path(col_data[col_names[0]]).stem
+        mrc_basename = Path(col_data[col_names[1]]).stem
         starfile_in = f'{mrc_basename}_in.star'
         starfile_out = f'{mrc_basename}_out.star'
         dag_vars = {
-            'mrc_file': col_data[col_names[0]],
-            'mrc_starfile': col_data[col_names[1]],
+            'mrc_PS_file': col_data[col_names[0]],
+            'mrc_file': col_data[col_names[1]],
+            'mrc_starfile': col_data[col_names[2]],
             'mrc_basename': mrc_basename,
             'starfile_in': starfile_in,
             'starfile_out': starfile_out,
@@ -423,9 +429,12 @@ def run_ctffind_work(submit_config, cmd_args, work_dir):
         # Modify the entry, truncating paths
         entry[col_names[0]] = Path(entry[col_names[0]]).name
         entry[col_names[1]] = Path(entry[col_names[1]]).name
+        entry[col_names[2]] = Path(entry[col_names[2]]).name
 
         # Write the input star file to the work dir
-        write_star_file(work_dir / starfile_in, [entry])
+        loops_single = loops.copy()
+        loops_single[loop_name]['entries'] = [entry]
+        write_star_file(work_dir / starfile_in, loops_single)
 
     submit_config['arguments'] = ' '.join(args)
     submit_config['transfer_input_files'] = transfer_input_files
@@ -441,53 +450,74 @@ def run_ctffind_post(cmd_args, work_dir):
     1. Merge of individual output starfiles into entire output starfile micrographs_ctf.star
     2. logfile.pdf
     3. Symlink of input micrograph files inside Movies/ directory
+    4. RELION_JOB_EXIT_SUCCESS
     '''
     # Create a dummy logfile
     logfile_path = Path(cmd_args.output_dir) / 'logfile.pdf'
     logfile_path.touch()
 
     # Get dict matching mrc name to mrc path
-    entries_in = parse_star_file(cmd_args.input_starfile)
-    keys = list(entries_in[0].keys())
-    keys.sort()
     mrc_paths = {}
+    loops_in = parse_star_file(cmd_args.input_starfile)
+    if 'data_micrographs' in loops_in:
+        loop_name = 'data_micrographs'
+    else:
+        loop_name = 'data_'
+    entries_in = loops_in[loop_name]['entries']
+    col_names = loops_in[loop_name]['headers']
     for entry in entries_in:
-        mrc_path = entry[keys[0]]
-        mrc_name = Path(entry[keys[0]]).name
+        mrc_path = entry[col_names[1]]
+        mrc_name = Path(mrc_path).name
         mrc_paths[mrc_name] = mrc_path
 
     # Create micrographs_ctf.star and symlink mrc files
-    entries_out = []
-    for starfile in work_dir.glob('*_out.star'):
-        entry = parse_star_file(starfile)[0]
-        keys = list(entry.keys())
-        keys.sort()
+    starfiles = list(work_dir.glob('*_out.star'))
+    loops = parse_star_file(starfiles[0])
+    if 'data_micrographs' in loops:
+        loop_name = 'data_micrographs'
+    else:
+        loop_name = 'data_'
+    loops[loop_name]['entries'] = []
+    col_names = loops[loop_name]['headers']
+    for starfile in starfiles:
+        entry = parse_star_file(starfile)[loop_name]['entries'][0]
 
-        mrc_name = entry[keys[0]]
-        if not (mrc_name) in mrc_paths:
+        # _rlnMicrographName #1
+        mrc_name = entry[col_names[0]]
+        if not mrc_name in mrc_paths:
             logging.warning(f'Did not find {mrc_name} from {starfile} in {cmd_args.input_starfile}\n')
             continue
-        ctf_path = Path(cmd_args.output_dir) / 'Movies' / Path(entry[keys[1]].split(':')[0]).name
-        mrc_ext = ':'.join(entry[keys[1]].split(':')[1:])
+        mrc_dir = Path(mrc_paths[mrc_name]).parent
+        entry[col_names[0]] = mrc_paths[mrc_name]
+
+        # _rlnCtfImage #3
+        ctf_name = entry[col_names[2]]
+        ctf_ext = Path(ctf_name).suffix.split(':')[0]
+        ctf_mrc_ext = '.' + Path(ctf_name).suffix.split(':')[1]
+        ctf_path = Path(cmd_args.output_dir) / 'Movies' / (Path(ctf_name).stem + ctf_ext)
+        ctf_mrc_path =  Path(mrc_dir) / (Path(ctf_name).stem + ctf_mrc_ext)
         if not ctf_path.exists():
             logging.warning(f'{ctf_path} from {starfile} does not exist\n')
             continue
+        entry[col_names[1]] = f"{ctf_path}:{ctf_mrc_ext.lstrip('.')}"
 
-        entry[keys[0]] = mrc_paths[mrc_name]
-        entry[keys[1]] = f'{ctf_path}:{mrc_ext}'
-        entries_out.append(entry)
+        loops[loop_name]['entries'].append(entry)
 
-        mrc_symlink_path = Path(cmd_args.output_dir) / 'Movies' / mrc_name
+        mrc_symlink_path = Path(cmd_args.output_dir) / 'Movies' / (Path(ctf_name).stem + ctf_mrc_ext)
         if not mrc_symlink_path.exists():
-            mrc_symlink_path.symlink_to(Path.cwd() / mrc_path)
+            mrc_symlink_path.symlink_to(Path.cwd() / ctf_mrc_path)
 
     # Write micrographs_ctf.star
-    write_star_file(str(Path(cmd_args.output_dir) / 'micrographs_ctf.star'), entries_out)
+    write_star_file(str(Path(cmd_args.output_dir) / 'micrographs_ctf.star'), loops)
 
-    
+    # Signal success
+    success_path = Path(cmd_args.output_dir) / 'RELION_JOB_EXIT_SUCCESS'
+    success_path.touch()
+
+
 def main():
     #./condor_relion_submit.py [--post] --command="$COMMAND" --threads="$THREADS" --dedicated="$DEDICATED" --outfile="$OUTFILE" --errfile="$ERRFILE"
-    fix_args()    
+    fix_args()
     parser = argparse.ArgumentParser()
     parser.add_argument('--command')
     parser.add_argument('--threads', type=int)
@@ -516,7 +546,7 @@ def main():
     work_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.post:
-        
+
         # set up initial transfer_input_files
         transfer_input_files = set([cmd_args.command_path])
         transfer_input_files.update(get_shared_libs(cmd_args.command_path))
@@ -562,7 +592,7 @@ def main():
         else:
             logging.error('Do not recognize relion command {cmd_name}')
             sys.exit(2)
-            
+
         logging.info(f'Done')
 
 
