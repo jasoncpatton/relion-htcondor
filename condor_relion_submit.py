@@ -392,11 +392,11 @@ def run_ctffind_work(submit_config, cmd_args, work_dir):
     # --use_given_ps 
     # --pipeline_control CtfFind/job039/
     Requires:
-    1. Micrograph file $(mrc_file)
-    2. Micrograph power spectrum file or Micrograph starfile $(mrc_starfile)
-    4. Individual input starfile $(starfile_in) per entry in entire input starfile
-    5. Rename of output starfile $(starfile_out)
-    6. Rename and relocation of output CTF $(mrc_basename).ctf
+    1. Micrograph file or micrograph power spectrum file $(mrc_file)
+    2. Micrograph starfile $(mrc_starfile)
+    3. Individual input starfile $(starfile_in) per entry in entire input starfile
+    4. Rename of output starfile $(starfile_out)
+    5. Rename and relocation of output CTF $(mrc_basename).ctf
     '''
 
     # Check for existence of flags
