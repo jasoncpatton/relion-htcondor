@@ -233,8 +233,8 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
     # --first_frame_sum 1 --last_frame_sum 0 --use_own --j 1 --bin_factor 1 --bfactor 150 --dose_per_frame 1.277 --preexposure 0 --patch_x 5 --patch_y 5
     # --defect_file Movies/NOTES
     # --gainref Movies/gain.mrc
-    # --dose_weighting --save_noDW 
-    # --grouping_for_ps 3 
+    # --dose_weighting --save_noDW
+    # --grouping_for_ps 3
     # --pipeline_control MotionCorr/job033/
     '''
 
@@ -245,7 +245,7 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
     with_save_noDW   = '--save_noDW'        in args
     with_ps          = '--grouping_for_ps'  in args
     with_pipeline    = '--pipeline_control' in args
-    
+
     # Fix flags and transfer additional input files
     transfer_input_files = submit_config['transfer_input_files']
     if with_defect_file:
@@ -388,8 +388,8 @@ def run_ctffind_work(submit_config, cmd_args, work_dir):
     # `which relion_run_ctffind` --i MotionCorr/job002/corrected_micrographs.star --o CtfFind/job039/
     # --Box 512 --ResMin 30 --ResMax 5 --dFMin 5000 --dFMax 50000 --FStep 500 --dAst 100 --do_phaseshift --phase_min 0 --phase_max 180 --phase_step 10 --ctfWin -1 --is_ctffind4
     # --use_noDW
-    # --ctffind_exe ctffind 
-    # --use_given_ps 
+    # --ctffind_exe ctffind
+    # --use_given_ps
     # --pipeline_control CtfFind/job039/
     Requires:
     1. Micrograph file or micrograph power spectrum file $(mrc_file)
@@ -420,7 +420,7 @@ def run_ctffind_work(submit_config, cmd_args, work_dir):
     if with_ps:
         pass
     if with_pipeline:
-        args[args.index('--pipeline_control') + 1] = './'        
+        args[args.index('--pipeline_control') + 1] = './'
 
     # Add per job input files
     transfer_input_files.add(str(work_dir / '$(starfile_in)'))
@@ -507,7 +507,7 @@ def run_ctffind_post(cmd, cmd_args, work_dir):
     with_use_noDW    = '--use_noDW'         in args
     with_ps          = '--use_given_ps'     in args
     with_pipeline    = '--pipeline_control' in args
-    
+
     # Get dict matching mrc name to mrc path from original input starfile
     mrc_paths = {}
     loops_in = parse_star_file(cmd_args.input_starfile)
