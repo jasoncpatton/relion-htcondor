@@ -27,16 +27,19 @@ Current supported tasks:
 
 ## Implementation details
 
-The `condor_relion_submit.sh` script
-reads templated variables set by RELION
-and then runs `condor_relion_submit.py`
-using the values inserted into those variables.
+`condor_relion_submit.sh`
+reads templated variables set by RELION.
+It then executes `condor_relion_submit.py`
+using the values inserted into those templated variables.
 
-`condor_relion_submit.py`:
-1. Adds required library files needed by any executables in a task to the job's set of transferred input files, along with the executables themselves.
+`condor_relion_submit.py` splits the requested task (if possible) into multiple HTCondor jobs,
+queues the job(s), and
+cleans up the job(s)'s outputs.
+Specifically, it:
+1. Adds required library files needed by any executables in a task to each HTCondor job's set of transferred input files, along with the executables themselves.
 2. When a task is splittable, splits the input starfile to multiple starfiles, one per input movie file.
-3. Adds the input movie(s) and starfile to each job's set of transferred input files.
-4. Writes and submits a DAG that runs `condor_relion_wrapper.sh` as the primary job and `condor_relion_submit.py` as a post script.
+3. Adds the input movie(s) and starfile to each HTCondor job's set of transferred input files.
+4. Writes and submits a DAG that runs `condor_relion_wrapper.sh` for each HTCondor job, and that runs `condor_relion_submit.py` as a post script after all HTCondor jobs have completed.
 5. When run as a post script, merges all output starfiles into a single starfile and marks the task as complete.
 
 `condor_relion_wrapper.sh`
