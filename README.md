@@ -2,6 +2,7 @@
 
 This repository contains a set of scripts
 that can be used with RELION
+(master branch requires RELION 3.1)
 to submit a batch job to HTCondor
 while running RELION on a submit node.
 
