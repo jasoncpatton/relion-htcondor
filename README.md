@@ -37,7 +37,7 @@ using the values inserted into those templated variables.
 queues the job(s), and
 cleans up the job(s)'s outputs.
 Specifically, it:
-1. Adds required library files needed by any executables in a task to each HTCondor job's set of transferred input files, along with the executables themselves.
+1. Adds required library files needed by any executables in a task to each HTCondor job's set of transferred input files, along with adding the executables themselves.
 2. When a task is splittable, splits the input starfile to multiple starfiles, one per input movie file.
 3. Adds the input movie(s) and starfile to each HTCondor job's set of transferred input files.
 4. Writes and submits a DAG that runs `condor_relion_wrapper.sh` for each HTCondor job, and that runs `condor_relion_submit.py` as a post script after all HTCondor jobs have completed.
