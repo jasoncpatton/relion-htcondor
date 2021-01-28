@@ -43,7 +43,7 @@ Specifically, it:
 5. When run as a post script, merges all output starfiles into a single starfile and marks the task as complete.
 
 `condor_relion_wrapper.sh`
-Runs when HTCondor starts a job on an execute node.
+runs when HTCondor starts a job on an execute node.
 Sets up the job environment (puts library files in the load path) and
 runs the requested RELION command using the starfile and movie files
 that were transferred to the execute node.
