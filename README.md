@@ -6,6 +6,10 @@ that can be used with RELION
 to submit a batch job to HTCondor
 while running RELION on a submit node.
 
+Current supported RELION tasks:
+* MotionCorr
+* CtfFind
+
 To use these scripts, place
 `condor_relion_submit.sh`,
 `condor_relion_submit.py`, and
@@ -21,10 +25,6 @@ in the "Running" tab, set:
 * Minimum dedicated cores per node: `1` (see note)
 
 Note: When "Number of threads" is an option, you may increase "Number of threads" and "Minimum dedicated cores per node" (both must be set to the same value) to have HTCondor request and use more CPU cores. However, a job that requests more than 1 CPU may sit idle longer in the HTCondor job queue.
-
-Current supported tasks:
-* MotionCorr
-* CtfFind
 
 ## Implementation details
 
