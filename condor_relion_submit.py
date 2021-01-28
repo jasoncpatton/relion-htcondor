@@ -152,7 +152,12 @@ def parse_command(command):
     parser.add_argument('command_path', nargs=1)
     parser.add_argument('--i', dest='input_starfile')
     parser.add_argument('--o', dest='output_dir')
-    return parser.parse_known_args(shlex.split(command))
+    args, remainder = parser.parse_known_args(shlex.split(command))
+    args.output_prefix = ''
+    if not args.output_dir.endswith('/'):
+        args.output_prefix = args.output_dir.split('/')[-1]
+        args.output_dir = '/'.join(args.output_dir.split('/')[:-1])
+    return args, remainder
 
 
 def fix_command(cmd_args, remainder):
@@ -160,7 +165,7 @@ def fix_command(cmd_args, remainder):
     # ./command --i $(starfile_in) --o output/
     cmd = f"./{Path(cmd_args.command_path).name}"
     i =   f"--i $(starfile_in)"
-    o =    "--o output/"
+    o =   f"--o output/{cmd_args.output_prefix}"
 
     if cmd[-4:] == '_mpi':
         logging.warning( 'HTCondor jobs may have difficulty with MPI versions of RELION executables.')
@@ -572,6 +577,97 @@ def run_ctffind_post(cmd, cmd_args, work_dir):
     success_path.touch()
 
 
+def run_class2d_work(submit_config, cmd_args, work_dir):
+    '''relion_refine
+    `which relion_refine_mpi` --o Class2D/job047/run --i Extract/job007/particles.star
+    --dont_combine_weights_via_disc --preread_images  --pool 30 --pad 2  --ctf  --iter 25 --tau2_fudge 2
+    --particle_diameter 200 --K 50 --flatten_solvent  --zero_mask  --oversampling 1 --psi_step 12 --offset_range 5
+    --offset_step 2 --norm --scale  --j 6 --gpu "0:1:2:3"  --pipeline_control Class2D/job047/
+
+    `which relion_refine` --o Class2D/job047/run --i Extract/job007/particles.star --dont_combine_weights_via_disc --scratch_dir /fix/me --pool 1 --pad 2  --ctf  --iter 25 --tau2_fudge 2 --particle_diameter 200 --K 50 --flatten_solvent  --zero_mask  --oversampling 1 --psi_step 12 --offset_range 5 --offset_step 2 --norm --scale  --j 1  --pipeline_control Class2D/job047/
+
+    `which relion_refine` --o Class2D/job047/run --i Extract/job007/particles.star --dont_combine_weights_via_disc --scratch_dir /fix/me --pool 1 --pad 2  --ctf  --iter 25 --tau2_fudge 2 --particle_diameter 200 --K 50 --flatten_solvent  --zero_mask  --oversampling 1 --psi_step 12 --offset_range 5 --offset_step 2 --norm --scale  --j 1 --gpu ""  --pipeline_control Class2D/job047/
+
+    Requires:
+    1. Extracted particles
+    '''
+
+    # Check for existence of flags
+    args = shlex.split(submit_config['arguments'])
+    with_pipeline = '--pipeline_control' in args
+    with_scratch  = '--scratch_dir' in args
+    with_gpus     = '--gpu' in args
+
+    # Fix flags and transfer additional input files
+    if with_pipeline:
+        args[args.index('--pipeline_control') + 1] = './'
+    if with_scratch:
+        args[args.index('--scratch_dir') + 1] = '$_CONDOR_SCRATCH_DIR/tmp'
+    if with_gpus:
+        submit_config['request_gpus'] = min(len(args[args.index('--gpu') + 1].split(':')), 1)
+        args[args.index('--gpu') + 1] = '""'
+
+    # Add per job input files
+    transfer_input_files = submit_config['transfer_input_files']
+    transfer_input_files.add(str(work_dir / '$(starfile_in)'))
+
+    # Add per job output files
+    iters = int(args[args.index('--iter') + 1])
+    transfer_output_files  = [f"output/{cmd_args.output_prefix}_it{iters:03d}_{name}.star" for name in ('data', 'model', 'optimiser', 'sampling')]
+    transfer_output_files += [f"output/{cmd_args.output_prefix}_it{iters:03d}_classes.mrcs",
+                                  f"output/{cmd_args.output_prefix}_unmasked_classes.mrcs"]
+    transfer_output_remaps = {}
+    for output_file in transfer_output_files:
+        transfer_output_remaps[Path(output_file).name] = f"{Path(cmd_args.output_dir).resolve() / Path(output_file).name}"
+
+    # Set up list of variables and fix input starfile
+    dag_varlist = []
+    # Get the root directory of the RELION project from the location of the starfile,
+    # which is useful in case the data are in a shared file system but the job is being
+    # submitted from a local directory.
+    relion_root = Path(cmd_args.input_starfile).resolve().parent.parent.parent
+    loops = parse_star_file(cmd_args.input_starfile)
+    if 'data_particles' in loops:
+        loop_name = 'data_particles'
+    else:
+        loop_name = 'data_'
+    col_names = loops[loop_name]['headers']
+    entries_in = loops[loop_name]['entries']
+    entries_out = []
+    for entry in entries_in:
+        # Convert relative paths to full paths in the starfile
+        (particle, image_path) = entry[col_names[5]].split('@')
+        entry[col_names[5]] = f"{particle}@{relion_root / image_path}"
+        entry[col_names[6]] = f"{relion_root / entry[col_names[6]]}"
+        entries_out.append(entry)
+    loops[loop_name]['entries'] = entries_out
+
+    starfile_in = Path(cmd_args.input_starfile).name
+    dag_varlist = [{'starfile_in': starfile_in}]
+    write_star_file(work_dir / starfile_in, loops)
+
+    submit_config['arguments'] = ' '.join(args)
+    submit_config['transfer_input_files'] = transfer_input_files
+    submit_config['transfer_output_files'] = ', '.join(transfer_output_files)
+    submit_config['transfer_output_remaps'] = transfer_output_remaps
+
+    # Additional job requirements
+    submit_config['request_memory'] = '16GB'
+    submit_config['request_disk'] = '16GB'
+    if 'requirements' in submit_config:
+        submit_config['requirements'] += '&& (Target.HasChtcStaging == true)'
+    else:
+        submit_config['requirements'] =     '(Target.HasChtcStaging == true)'
+
+    return (submit_config, dag_varlist)
+
+
+def run_class2d_post(cmd, cmd_args, work_dir):
+    # Signal success
+    success_path = Path(cmd_args.output_dir) / 'RELION_JOB_EXIT_SUCCESS'
+    success_path.touch()
+
+
 def main():
     #./condor_relion_submit.py [--post] --command="$COMMAND" --threads="$THREADS" --dedicated="$DEDICATED" --outfile="$OUTFILE" --errfile="$ERRFILE"
     fix_args()
@@ -621,7 +717,7 @@ def main():
             'output': 'run_$(ClusterId).$(ProcId).out',
             'error': 'run_$(ClusterId).$(ProcId).err',
             'log': 'condor.log',
-            'requirements': '(HasChtcSoftware == true)',
+            'requirements': '(Target.HasChtcSoftware == true)',
             'should_transfer_files': 'YES',
         }
         dag_varlist = []
@@ -631,6 +727,8 @@ def main():
             (submit_config, dag_varlist) = run_ctffind_work(submit_config, cmd_args, work_dir)
         elif cmd_name == 'relion_run_motioncorr':
             (submit_config, dag_varlist) = run_motioncorr_work(submit_config, cmd_args, work_dir)
+        elif cmd_name == 'relion_refine':
+            (submit_config, dag_varlist) = run_class2d_work(submit_config, cmd_args, work_dir)
         else:
             (Path.cwd() / cmd_args.output_dir / 'RELION_JOB_EXIT_FAILURE').touch()
             logging.error('Do not recognize relion command {cmd_name}')
@@ -647,6 +745,8 @@ def main():
             run_ctffind_post(args.command, cmd_args, work_dir)
         elif cmd_name == 'relion_run_motioncorr':
             run_motioncorr_post(args.command, cmd_args, work_dir)
+        elif cmd_name == 'relion_refine':
+            run_class2d_post(args.command, cmd_args, work_dir)
         else:
             (Path.cwd() / cmd_args.output_dir / 'RELION_JOB_EXIT_FAILURE').touch()
             logging.error('Do not recognize relion command {cmd_name}')
