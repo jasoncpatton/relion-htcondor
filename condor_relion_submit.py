@@ -55,7 +55,7 @@ def get_shared_libs(executable, known_deps=None):
         if not m:
             continue
         lib, location = m.groups()
-        if (lib in direct_deps) and ('/home/' in location):
+        if (lib in direct_deps) and not ('/software/chtc' in location):
             transfer_files.add(location)
 
     if known_deps and transfer_files.issubset(known_deps):
@@ -326,7 +326,7 @@ def run_motioncorr_work(submit_config, cmd_args, work_dir):
     submit_config['transfer_output_remaps'] = transfer_output_remaps
 
     # Additional job requirements
-    submit_config['request_memory'] = '3GB'
+    submit_config['request_memory'] = '8GB'
 
     return (submit_config, dag_varlist)
 
@@ -617,12 +617,13 @@ def main():
             'transfer_output_files': 'output/',
             'request_cpus': args.dedicated,
             'request_memory': f"{2*args.dedicated}GB",
-            'request_disk': '1GB',
+            'request_disk': '8GB',
             'output': 'run_$(ClusterId).$(ProcId).out',
             'error': 'run_$(ClusterId).$(ProcId).err',
             'log': 'condor.log',
             'requirements': '(HasChtcSoftware == true)',
             'should_transfer_files': 'YES',
+            '+WantFlocking': True,
         }
         dag_varlist = []
 
